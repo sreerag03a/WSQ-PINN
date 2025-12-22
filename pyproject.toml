@@ -1,0 +1,25 @@
+[project]
+name = "quintessence-ode-pinn"
+version = "0.1.0"
+description = "A Physics-Informed Neural Network to emulate quintessence."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    {name = "Sreerag", email = "sreeragradhakrishnan01@gmail.com"}
+]
+
+keywords = ["cosmology", "physics-informed-neural-network", "data-analysis", "bayesian"]
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "getdist",
+    "emcee",
+    "torch",
+    "cython",
+    "scikit-learn",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
