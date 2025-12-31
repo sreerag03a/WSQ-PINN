@@ -6,7 +6,7 @@ import random
 import os
 
 
-from components.model.wsqmodel_functions import solver
+from components.model.wsqmodel_functions import solver, wsq_H_f
 from components.model.model import PINN_WSQ
 
 import torch
@@ -58,10 +58,10 @@ def gen_solver(param_set,savepath,num_z = 100):
     train_vals = []
     for params in param_set:
         H0_,omega_m_,y0_ = params
-        x,y,h = solver(params,zvals)
-        Hvals_,xvals_,yvals_ = H0_*h,x,y
-        for i,Hval in enumerate(Hvals_):
-            train_vals.append([H0_,omega_m_,y0_,zvals[i],Hval,xvals_[i],yvals_[i]])
+        x,y,la,H = solver(params,zvals)
+
+        for i,Hval in enumerate(H):
+            train_vals.append([H0_,omega_m_,y0_,zvals[i],x[i],y[i],la[i],Hval])
     random.shuffle(train_vals)
     np.savetxt(savepath,train_vals)
 
@@ -77,54 +77,41 @@ class CustomDataset(Dataset):
     
     def __getitem__(self, index):
         
-        real_params = self.data[index,:-3]
-        real_out = self.data[index,-3:]
+        real_params = self.data[index,:-4]
+        real_out = self.data[index,-4:]
         
 
-        inbet_points = np.random.uniform(low = [40,0,0,0],high = [100,1,1,3],size = (4,)).astype(np.float32)
+        inbet_points = np.random.uniform(low = [40,0,0,0],high = [100,1,1,3],size = (4,)).astype(np.float32) #Collocation points
         return {
-            'real_x' : torch.tensor(real_params,requires_grad=True),
+            'real_x' : torch.tensor(real_params),
             'real_y' : torch.tensor(real_out),
-            # 'inbet_x' : torch.tensor(inbet_points,requires_grad=True)
+            'inbet_x' : torch.tensor(inbet_points,requires_grad=True)
         }
 
 
 
 def calc_phys_loss(model,inputs):
-    # H0_,omega_m_,y0_,z_ = inputs
     
-    H0_ = inputs[:,0]
-
-    y0_ = inputs[:,-2]
-    z_ = inputs[:,-1]
     predictions = model(inputs)
-    H_preds = predictions[:,0]
+    
 
-    x_preds = predictions[:,1]
-    y_preds = predictions[:,2]
-    h_preds = H_preds/H0_
-    dH_dz_ = torch.autograd.grad(h_preds,inputs,grad_outputs=torch.ones_like(h_preds), create_graph=True)[0][:,-1]
-    dx_dz = torch.autograd.grad(x_preds,inputs,grad_outputs=torch.ones_like(x_preds), create_graph=True)[0][:,-1]
-    dy_dz = torch.autograd.grad(y_preds,inputs,grad_outputs=torch.ones_like(y_preds), create_graph=True)[0][:,-1]
+    x_preds = predictions[:,0]
+    y_preds = predictions[:,1]
+    lambda_preds = predictions[:,2]
+    H_preds = predictions[:,3]
 
-
-
-    dH_dz_th = (3/2)*((h_preds**2)+(x_preds**2)-(y_preds**2))/(h_preds*(1+z_))
-    dx_dz_th = 3*x_preds/(1+z_) - (torch.sqrt(torch.tensor(3/2))* x_preds*y_preds*(1 - (0.5* (y_preds/y0_)**2))/(h_preds*(1+z_)) )
-    dy_dz_th = torch.sqrt(torch.tensor(3/2))* y_preds*y_preds*(1 - (0.5* (y_preds/y0_)**2))/(h_preds*(1+z_)) 
-
-    return torch.mean((dH_dz_ - dH_dz_th)**2) + torch.mean((dx_dz - dx_dz_th)**2) + torch.mean((dy_dz-dy_dz_th)**2)
-
+    return torch.mean(wsq_H_f(inputs,(x_preds,y_preds,lambda_preds,H_preds)))
 
 def train_model(datapath,n_epochs = 50):
 
     device = torch.device("cuda")
     dataset = CustomDataset(datapath)
 
-    loader = DataLoader(dataset, batch_size = 100, shuffle= True)
+    loader = DataLoader(dataset, batch_size = 500, shuffle= True)
 
     model = PINN_WSQ(activation_function=nn.Tanh).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = optim.Adam(model.parameters(), lr=1e-2)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=15)
 
     for epoch in range(n_epochs):
         loss_epoch = 0
@@ -132,28 +119,30 @@ def train_model(datapath,n_epochs = 50):
         for batch in loader:
             train_x = batch['real_x'].to(device)
             train_y = batch['real_y'].to(device)
-            # inbet_x = batch['inbet_x'].to(device)
+            inbet_x = batch['inbet_x'].to(device)
 
-            H_train,x_train,y_train = train_y[:,0],train_y[:,1],train_y[:,2]
 
             preds = model(train_x)
-            H_pred,x_pred,y_pred = preds[:,0],preds[:,1],preds[:,2]
-            # loss_data = torch.mean((H_train-H_pred)**2) + torch.mean((x_train-x_pred)**2) + torch.mean((y_train-y_pred)**2)
+
             loss_data = nn.MSELoss()(preds,train_y)
 
-            # print(inbet_x)
-            # loss_phy=0
-            loss_phy = calc_phys_loss(model,train_x)
-            # tot_loss = loss_data
-            tot_loss = (loss_data + 0.1*loss_phy)*1e-5
+            loss_phy = calc_phys_loss(model,inbet_x)
+
+
+            # epoch_progress = min(epoch / 40.0, 1.0)
+            alpha = 1
+            tot_loss = loss_data + (alpha * loss_phy)
 
             optimizer.zero_grad()
             tot_loss.backward()
+
             optimizer.step()
+            
 
             loss_epoch += tot_loss
+        scheduler.step(loss_epoch)
 
-        print(f"Epoch {epoch+1}: Loss = {loss_epoch / len(loader):.4f}")
+        print(f"Epoch {epoch+1}: Loss = {loss_epoch / len(loader):.4f}, learning rate : {scheduler.get_last_lr()}")
     return model
 
 
@@ -168,15 +157,8 @@ def train_model(datapath,n_epochs = 50):
 if __name__ == '__main__':
     savepath = os.path.join(os.getcwd(),"outputs","gen_data.txt")
     param_inputs = gen_params()
-    print(param_inputs)
-    # # print(sum(((omega_m + y0**2)<1).astype(int)) == n_samples)
-
     # start = time()
-    Hdata = gen_solver(param_inputs,savepath)
-    # end = time()
-    # print(f'Hlen = {len(Hdata)}')
-    # print(end-start)
-    # print(Hdata[0])
+    gen_solver(param_inputs,savepath)
     device = torch.device("cuda")
-    model = train_model(savepath,20)
+    model = train_model(savepath,1000)
     print(model(torch.tensor((70,0.3,0.822,0)).to(device)))
