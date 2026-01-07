@@ -53,47 +53,11 @@ def gen_params(n_samples = 600):
     param_inputs = np.column_stack([param_inputs[:,0],omega_m,y0])
     return param_inputs
 
-def gen_solver(param_set,savepath,num_z = 100):
-    zvals = np.linspace(0,3,num_z)
-    train_vals = []
-    for params in param_set:
-        H0_,omega_m_,y0_ = params
-        x,y,la,H = solver(params,zvals)
-
-        for i,Hval in enumerate(H):
-            train_vals.append([H0_,omega_m_,y0_,zvals[i],x[i],y[i],la[i],Hval])
-    random.shuffle(train_vals)
-    np.savetxt(savepath,train_vals)
-
-    logging.info(f'Saved generated data to {savepath}')
-    return np.asarray(train_vals)
-
-class CustomDataset(Dataset):
-    def __init__(self,datapath):
-        self.data = np.loadtxt(datapath).astype(np.float32)
-        
-    def __len__(self):
-        return len(self.data)
-    
-    def __getitem__(self, index):
-        
-        real_params = self.data[index,:-4]
-        real_out = self.data[index,-4:]
-        
-
-        inbet_points = np.random.uniform(low = [40,0,0,0],high = [100,1,1,3],size = (4,)).astype(np.float32) #Collocation points
-        return {
-            'real_x' : torch.tensor(real_params),
-            'real_y' : torch.tensor(real_out),
-            'inbet_x' : torch.tensor(inbet_points,requires_grad=True)
-        }
-
-
 
 def calc_phys_loss(model,inputs):
     
+    # x_preds,y_preds,lambda_preds,H_preds = model(inputs)
     predictions = model(inputs)
-    
 
     x_preds = predictions[:,0]
     y_preds = predictions[:,1]
@@ -102,47 +66,71 @@ def calc_phys_loss(model,inputs):
 
     return torch.mean(wsq_H_f(inputs,(x_preds,y_preds,lambda_preds,H_preds)))
 
-def train_model(datapath,n_epochs = 50):
-
+def train_model(train_params = 600,n_epochs = 500, learning_r = 1e-3,batch_size = 200,colloc_times = 500):
+    
     device = torch.device("cuda")
-    dataset = CustomDataset(datapath)
+    # dataset = CustomDataset(train_params)
 
-    loader = DataLoader(dataset, batch_size = 500, shuffle= True)
+    # loader = DataLoader(dataset, batch_size = 600, shuffle= True)
+    paramset = torch.tensor(gen_params(train_params), dtype=torch.float32).to(device)
 
+    z0 = torch.zeros(paramset.shape[0], 1).to(device)
+    train_x = torch.cat([paramset,z0], dim=1)
+
+    del(z0)
+    H0_,omega_m_,y0_ = paramset[:,0:1],paramset[:,1:2],paramset[:,2:3]
+    x0_ = torch.sqrt(1 - omega_m_ - (y0_**2)).reshape(-1,1)
+    la0 = torch.full_like(x0_, 0.5)
+    
+    train_y = torch.cat((x0_,y0_,la0,H0_),dim=1).to(device)
+    
+    # print(train_y.shape)
+    
     model = PINN_WSQ(activation_function=nn.Tanh).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-2)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=15)
-
+    optimizer = optim.Adam(model.parameters(), lr = learning_r)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
+    batches_n = int(train_params/batch_size)
     for epoch in range(n_epochs):
+
         loss_epoch = 0
+        for i in range(batches_n):
+            start,end = i*batch_size,(i+1)*batch_size
+            x_train,y_train = train_x[start:end,:],train_y[start:end,:]
+            params_ = paramset[start:end,:]
+            z_colloc = torch.linspace(0.0, 3.0, colloc_times,dtype=torch.float32).to(device)
+            z_colloc = z_colloc.repeat(batch_size).reshape(-1,1)
+            colloc_x = params_.repeat_interleave(colloc_times,dim=0)
 
-        for batch in loader:
-            train_x = batch['real_x'].to(device)
-            train_y = batch['real_y'].to(device)
-            inbet_x = batch['inbet_x'].to(device)
+            colloc_x =  torch.cat([colloc_x,z_colloc], dim=1)
+
+            
+
+            colloc_x.requires_grad = True
+            
+
+            preds = model(x_train)
+            tot_loss = nn.MSELoss()(preds,y_train)
+            # tot_loss=0
+            loss_phy = calc_phys_loss(model,colloc_x) # work in progress
 
 
-            preds = model(train_x)
-
-            loss_data = nn.MSELoss()(preds,train_y)
-
-            loss_phy = calc_phys_loss(model,inbet_x)
-
-
-            # epoch_progress = min(epoch / 40.0, 1.0)
-            alpha = 1
-            tot_loss = loss_data + (alpha * loss_phy)
+            epoch_progress = min(epoch / 40.0, 1.0)
+            alpha = epoch_progress*0.1
+            tot_loss += (alpha * loss_phy)
+            
 
             optimizer.zero_grad()
             tot_loss.backward()
 
             optimizer.step()
-            
+                
 
             loss_epoch += tot_loss
-        scheduler.step(loss_epoch)
-
-        print(f"Epoch {epoch+1}: Loss = {loss_epoch / len(loader):.4f}, learning rate : {scheduler.get_last_lr()}")
+        if (epoch+1)%500 == 0:
+            optimizer.param_groups[0]['lr'] *= 0.5
+        # scheduler.step(loss_epoch)
+        logging.info(f"Epoch {epoch+1}: Loss = {loss_epoch:.4f}, learning rate : {optimizer.param_groups[0]['lr']}")
+        print(f"Epoch {epoch+1}: Loss = {loss_epoch:.4f}, learning rate : {optimizer.param_groups[0]['lr']}")
     return model
 
 
@@ -155,10 +143,15 @@ def train_model(datapath,n_epochs = 50):
 
 
 if __name__ == '__main__':
-    savepath = os.path.join(os.getcwd(),"outputs","gen_data.txt")
-    param_inputs = gen_params()
-    # start = time()
-    gen_solver(param_inputs,savepath)
+    # savepath = os.path.join(os.getcwd(),"outputs","gen_data.txt")
+    # param_inputs = gen_params()
+    # # start = time()
+    # gen_solver(param_inputs,savepath)
     device = torch.device("cuda")
-    model = train_model(savepath,1000)
-    print(model(torch.tensor((70,0.3,0.822,0)).to(device)))
+    model = train_model(train_params=100,n_epochs=5000,learning_r=1e-3,batch_size=10,colloc_times=100)
+
+
+    print(f'Model pred : {model(torch.tensor(([70,0.3,0.822,0])).to(device))}')
+    print(f'Actual : {solver((70,0.3,0.822),[0])}')
+    print(f'Model pred : {model(torch.tensor(([70,0.3,0.822,3])).to(device))}')
+    print(f'Actual : {solver((70,0.3,0.822),[3])}')

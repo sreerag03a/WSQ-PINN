@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.integrate import solve_ivp
-
+import matplotlib.pyplot as plt
 import torch
 
 def wsq_ode(z,y1):
@@ -38,13 +38,23 @@ def wsq_H_f(inputs,y1):
     dH_dz_ = torch.autograd.grad(H,inputs, grad_outputs= torch.ones_like(H), create_graph=True)[0][:,-1]
 
 
-    dH_dz_th = -(3/2)*H*(1 + x**2 - y**2)/(1+z)
     dx_dz_th = (3*x - (np.sqrt(3/2)*la*y**2) - ((3/2)*x*(1 + x**2 - y**2)))/(1+z)
     dy_dz_th  = ((np.sqrt(3/2)*la*y*x) - ((3/2)*y*(1 + x**2 - y**2)))/(1+z)
     dla_dz_th = -np.sqrt(6)*x*la*(1-la)/(1+z)
+    dH_dz_th = (3/2)*H*(1 + x**2 - y**2)/(1+z)
 
     return (dH_dz_- dH_dz_th)**2 + (dx_dz_- dx_dz_th)**2 + (dy_dz_- dy_dz_th)**2 + (dla_dz_- dla_dz_th)**2
 
 if __name__ =='__main__':
-    x,y,la,H = solver((69,0.3,0.82),[0,0.1,0.2])
-    print(H)
+    zvals = np.linspace(0,150,10000)
+    x,y,la,H = solver((69,0.3,0.82),zvals,(0,150))
+    plt.plot(zvals,H)
+    plt.show()
+    ode = x**2 + y**2
+    plt.plot(zvals,ode,label = r'$\Omega_\text{de}$')
+    plt.plot(zvals,1-ode, label = r'$\Omega_\text{m}$')
+    plt.legend()
+    plt.show()
+
+    plt.plot(zvals,la)
+    plt.show()
