@@ -54,17 +54,21 @@ def gen_params(n_samples = 600):
     return param_inputs
 
 
-def calc_phys_loss(model,inputs):
+def calc_phys_loss(model,z,params):
     
     # x_preds,y_preds,lambda_preds,H_preds = model(inputs)
-    predictions = model(inputs)
+    predictions = model(z,params)
+    x_preds,y_preds,lambda_preds,H_preds = predictions
+    
 
-    x_preds = predictions[:,0]
-    y_preds = predictions[:,1]
-    lambda_preds = predictions[:,2]
-    H_preds = predictions[:,3]
+    # print('preds : ',x_preds.shape)
+    # x_preds = predictions[:,0]
+    # y_preds = predictions[:,1]
+    # lambda_preds = predictions[:,2]
+    # H_preds = predictions[:,3]
+    # print(torch.mean(wsq_H_f(inputs,(x_preds,y_preds,lambda_preds,H_preds)))*1e3)
 
-    return torch.mean(wsq_H_f(inputs,(x_preds,y_preds,lambda_preds,H_preds)))
+    return torch.mean(wsq_H_f(z,(x_preds,y_preds,lambda_preds,H_preds)))
 
 def train_model(train_params = 600,n_epochs = 500, learning_r = 1e-3,batch_size = 200,colloc_times = 500):
     
@@ -95,28 +99,34 @@ def train_model(train_params = 600,n_epochs = 500, learning_r = 1e-3,batch_size 
         loss_epoch = 0
         for i in range(batches_n):
             start,end = i*batch_size,(i+1)*batch_size
-            x_train,y_train = train_x[start:end,:],train_y[start:end,:]
+            # x_train,y_train = train_x[start:end,:],train_y[start:end,:]
             params_ = paramset[start:end,:]
-            z_colloc = torch.linspace(0.0, 3.0, colloc_times,dtype=torch.float32).to(device)
-            z_colloc = z_colloc.repeat(batch_size).reshape(-1,1)
+            z_colloc = torch.cat([torch.linspace(0,0.3,int(0.2*colloc_times*batch_size)),torch.linspace(0.3,3.0,int(0.8*colloc_times*batch_size))]).to(device)
+            z_colloc = z_colloc.reshape(-1,1)
+            # z_colloc = torch.linspace(0.0, 3.0, colloc_times,dtype=torch.float32).to(device)
+            # z_colloc = z_colloc.repeat(batch_size).reshape(-1,1)
+
             colloc_x = params_.repeat_interleave(colloc_times,dim=0)
 
-            colloc_x =  torch.cat([colloc_x,z_colloc], dim=1)
+            # colloc_x =  torch.cat([colloc_x,z_colloc], dim=1)
 
             
 
-            colloc_x.requires_grad = True
+            z_colloc.requires_grad = True
             
 
-            preds = model(x_train)
-            tot_loss = nn.MSELoss()(preds,y_train)
-            # tot_loss=0
-            loss_phy = calc_phys_loss(model,colloc_x) # work in progress
+            # preds = model(x_train)
+            # tot_loss = nn.MSELoss()(preds,y_train)
+            # print(tot_loss)
 
+            tot_loss=0
+            loss_phy = calc_phys_loss(model,z_colloc,colloc_x) # work in progress
+            # print(loss_phy)
 
-            epoch_progress = min(epoch / 40.0, 1.0)
-            alpha = epoch_progress*0.1
-            tot_loss += (alpha * loss_phy)
+            # epoch_progress = min(epoch / 40.0, 1.0)
+            # alpha = epoch_progress*0.1
+
+            tot_loss += loss_phy
             
 
             optimizer.zero_grad()
@@ -124,11 +134,12 @@ def train_model(train_params = 600,n_epochs = 500, learning_r = 1e-3,batch_size 
 
             optimizer.step()
                 
-
+            
             loss_epoch += tot_loss
-        if (epoch+1)%500 == 0:
+        if (epoch+1)%1000 == 0:
             optimizer.param_groups[0]['lr'] *= 0.5
         # scheduler.step(loss_epoch)
+        
         logging.info(f"Epoch {epoch+1}: Loss = {loss_epoch:.4f}, learning rate : {optimizer.param_groups[0]['lr']}")
         print(f"Epoch {epoch+1}: Loss = {loss_epoch:.4f}, learning rate : {optimizer.param_groups[0]['lr']}")
     return model
@@ -148,10 +159,13 @@ if __name__ == '__main__':
     # # start = time()
     # gen_solver(param_inputs,savepath)
     device = torch.device("cuda")
-    model = train_model(train_params=100,n_epochs=5000,learning_r=1e-3,batch_size=10,colloc_times=100)
+    model = train_model(train_params=100,n_epochs=10000,learning_r=1e-2,batch_size=10,colloc_times=100)
 
+    for name, p in model.named_parameters():
+            if p.grad is not None:
+                print(name, p.grad.abs().mean().item())
 
-    print(f'Model pred : {model(torch.tensor(([70,0.3,0.822,0])).to(device))}')
+    print(f'Model pred : {model(torch.tensor([0],dtype= torch.float32).to(device),torch.tensor(([70,0.3,0.822]),dtype= torch.float32).to(device))}')
     print(f'Actual : {solver((70,0.3,0.822),[0])}')
-    print(f'Model pred : {model(torch.tensor(([70,0.3,0.822,3])).to(device))}')
+    print(f'Model pred : {model(torch.tensor([3],dtype= torch.float32).to(device),torch.tensor(([70,0.3,0.822]),dtype= torch.float32).to(device))}')
     print(f'Actual : {solver((70,0.3,0.822),[3])}')
